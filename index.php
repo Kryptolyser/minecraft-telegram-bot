@@ -10,22 +10,35 @@ use xPaw\MinecraftQuery;
 use xPaw\MinecraftQueryException;
 
 $live_playerlist = get_live_playerlist();
-$cached_playerlist = get_cached_playerlist();
+$cache = load_cache();
+$cached_playerlist = $cache["playerlist"];
+$player_disconnect_time = is_array($cache["player_disconnect_time"])
+  ? $cache["player_disconnect_time"]
+  : [];
 $message_to_chat = "";
 
 // Compare live playerlist to cached playerlist. If there is a change, generate a message
 if ($live_playerlist != $cached_playerlist) {
-  $message_to_chat = generate_message($live_playerlist, $cached_playerlist);
+  list($message_to_chat, $send_new_msg) = 
+    generate_message($live_playerlist, $cached_playerlist, $player_disconnect_time);
 }
 
-// If there's a message, post it
+// If there's a new message, post it
 if ($message_to_chat) {
-  post_message_to_chat($message_to_chat);
+  if ($send_new_msg) {
+    delete_last_message();
+    post_message_to_chat($message_to_chat);
+  }
+  else {
+    update_last_message($message_to_chat);
+  }
   echo $message_to_chat; // also echo the result for easier debugging without chat spam
 }
 
 // When done, cache current playerlist
-cache_playerlist($live_playerlist);
+$cache["playerlist"] = $live_playerlist;
+$cache["player_disconnect_time"] = $player_disconnect_time;
+save_cache($cache);
 
 // Display execution time. Useful for adjusting the interval to call this script
 $execution_time = microtime(true) - $start;
@@ -45,20 +58,20 @@ function get_live_playerlist()
   }
 }
 
-function get_cached_playerlist()
+function load_cache()
 {
-  $playerlist = unserialize(file_get_contents("cache"));
-  return $playerlist;
+  $cache = unserialize(file_get_contents("cache"));
+  return $cache;
 }
 
-function cache_playerlist($playerlist)
+function save_cache($cache)
 {
-  file_put_contents("cache", serialize($playerlist));
+  file_put_contents("cache", serialize($cache));
 }
 
-function generate_message($live_playerlist, $cached_playerlist)
+function generate_message($live_playerlist, $cached_playerlist, &$player_disconnect_time)
 {
-  global $lang;
+  global $config, $lang, $cache;
   // The playerlist is an empty string if no players joined but we ALWAYS need an array for the following functions
   $live_playerlist_array = is_array($live_playerlist) ? $live_playerlist : [];
   $cached_playerlist_array = is_array($cached_playerlist)
@@ -74,19 +87,31 @@ function generate_message($live_playerlist, $cached_playerlist)
     $live_playerlist_array
   );
 
+  $send_new_msg = false;
+
+  $lines = [];
   foreach ($players_joined as $player_joined) {
-    $message .= $player_joined . " " . $lang["joined"] . " ";
+    $disconnect_time = $player_disconnect_time[$player_joined] ?? 0;
+    if (time() - $disconnect_time > $config["disconnect_time"] * 60) {
+      $send_new_msg = true;
+    }
+    array_push($lines, $player_joined . " " . $lang["joined"] . " ");
   }
 
   foreach ($players_disconnected as $player_disconnected) {
-    $message .= $player_disconnected . " " . $lang["disconnected"] . " ";
+    array_push($lines, "<s>". $player_disconnected . " " . $lang["joined"] . "</s> ");
+    $player_disconnect_time[$player_disconnected] = time();
+  }
+
+  if (!empty($lines)) {
+    $message = implode("\r\n", $lines) ."\r\n";
   }
 
   $player_count = count($live_playerlist_array);
 
   switch ($player_count) {
     case 0:
-      $message .= $lang["no_players_connected"];
+      $message .= "<b>". $lang["no_players_connected"] ."</b>";
       break;
     case 1:
       $message .= $lang["one_player_connected"];
@@ -94,14 +119,49 @@ function generate_message($live_playerlist, $cached_playerlist)
     default:
       $message .= $player_count . " " . $lang["players_connected"];
   }
-  return $message;
+
+  return [$message, $send_new_msg];
 }
 
 function post_message_to_chat($message)
 {
-  global $config;
+  global $config, $cache;
   $telegram = new Telegram($config["bot_token"]);
-  $content = ["chat_id" => $config["chat_id"], "text" => $message];
-  $telegram->sendMessage($content);
+  $content = ["chat_id" => $config["chat_id"], "text" => $message, "parse_mode" => "HTML"];
+  $response = $telegram->sendMessage($content);
+  if (isset($response["result"]) && isset($response["result"]["message_id"])) {
+    $cache["last_message_id"] = $response["result"]["message_id"];
+  }
+}
+
+function delete_last_message()
+{
+  global $config, $cache;
+
+  if (!isset($cache["last_message_id"])) {
+    return;
+  }
+
+  $telegram = new Telegram($config["bot_token"]);
+  $content = ["chat_id" => $config["chat_id"], "message_id" => $cache["last_message_id"]];
+  $telegram->deleteMessage($content);
+  unset($cache["last_message_id"]);
+}
+
+function update_last_message($message)
+{
+  global $config, $cache;
+
+  if (!isset($cache["last_message_id"])) {
+    return;
+  }
+
+  $telegram = new Telegram($config["bot_token"]);
+  $content = [
+    "chat_id" => $config["chat_id"], 
+    "text" => $message, 
+    "message_id" => $cache["last_message_id"], 
+    "parse_mode" => "HTML"];
+  $telegram->editMessageText($content);
 }
 ?>
