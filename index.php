@@ -15,12 +15,15 @@ $cached_playerlist = $cache["playerlist"];
 $player_disconnect_time = is_array($cache["player_disconnect_time"])
   ? $cache["player_disconnect_time"]
   : [];
+$disconnected_players = is_array($cache["disconnected_players"])
+  ? $cache["disconnected_players"]
+  : [];
 $message_to_chat = "";
 
 // Compare live playerlist to cached playerlist. If there is a change, generate a message
 if ($live_playerlist != $cached_playerlist) {
   list($message_to_chat, $send_new_msg) = 
-    generate_message($live_playerlist, $cached_playerlist, $player_disconnect_time);
+    generate_message($live_playerlist, $cached_playerlist, $player_disconnect_time, $disconnected_players);
 }
 
 // If there's a new message, post it
@@ -38,6 +41,7 @@ if ($message_to_chat) {
 // When done, cache current playerlist
 $cache["playerlist"] = $live_playerlist;
 $cache["player_disconnect_time"] = $player_disconnect_time;
+$cache["disconnected_players"] = $disconnected_players;
 save_cache($cache);
 
 // Display execution time. Useful for adjusting the interval to call this script
@@ -69,7 +73,7 @@ function save_cache($cache)
   file_put_contents("cache", serialize($cache));
 }
 
-function generate_message($live_playerlist, $cached_playerlist, &$player_disconnect_time)
+function generate_message($live_playerlist, $cached_playerlist, &$player_disconnect_time, &$disconnected_players)
 {
   global $config, $lang, $cache;
   // The playerlist is an empty string if no players joined but we ALWAYS need an array for the following functions
@@ -90,17 +94,32 @@ function generate_message($live_playerlist, $cached_playerlist, &$player_disconn
   $send_new_msg = false;
 
   $lines = [];
-  foreach ($players_joined as $player_joined) {
-    $disconnect_time = $player_disconnect_time[$player_joined] ?? 0;
+  foreach ($live_playerlist_array as $player_online) {
+    $disconnect_time = $player_disconnect_time[$player_online] ?? 0;
     if (time() - $disconnect_time > $config["disconnect_time"] * 60) {
       $send_new_msg = true;
     }
-    array_push($lines, $player_joined . " " . $lang["joined"] . " ");
+    array_push($lines, "<b>". $player_online . "</b> " . $lang["joined"] . " ");
+
+    $pos = array_search($player_online, $disconnected_players);
+    if ($pos !== false) {
+      unset($disconnected_players[$pos]);
+    }
+  }
+
+  if ($send_new_msg) {
+    $disconnected_players = [];
   }
 
   foreach ($players_disconnected as $player_disconnected) {
-    array_push($lines, "<s>". $player_disconnected . " " . $lang["joined"] . "</s> ");
+    if (!in_array($player_disconnected, $disconnected_players)) {
+      array_push($disconnected_players, $player_disconnected);
+    }
     $player_disconnect_time[$player_disconnected] = time();
+  }
+
+  foreach ($disconnected_players as $player_disconnected) {
+    array_push($lines, "<s><b>". $player_disconnected . "</b> " . $lang["joined"] . "</s> ");
   }
 
   if (!empty($lines)) {
